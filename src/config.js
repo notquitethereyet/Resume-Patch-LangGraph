@@ -3,7 +3,6 @@ export const config = {
   openai: {
     apiKey: process.env.OPENAI_API_KEY,
     model: process.env.OPENAI_MODEL,
-    temperature: 0.1,
     maxTokens: 2000
   },
   

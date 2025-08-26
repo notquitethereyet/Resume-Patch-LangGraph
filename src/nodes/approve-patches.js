@@ -37,7 +37,9 @@ export async function approvePatchesNode(state) {
     logger.info('Patch approval completed', { 
       totalPatches: state.patches.length,
       approvedCount: approvedPatches.length,
-      rejectedCount: state.patches.length - approvedPatches.length
+      rejectedCount: state.patches.length - approvedPatches.length,
+      approvedPatchTypes: approvedPatches.map(p => ({ id: p.id, type: p.type, value: p.details?.value })),
+      rejectedPatchIds: state.patches.filter(p => !approvedPatches.find(ap => ap.id === p.id)).map(p => p.id)
     });
     
     return {
