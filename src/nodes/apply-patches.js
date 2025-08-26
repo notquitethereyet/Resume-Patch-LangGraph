@@ -2,12 +2,12 @@ import { logger } from '../utils/logger.js';
 import { ProcessingError } from '../utils/error-handler.js';
 
 export async function applyPatchesNode(state) {
-  logger.info('✅ Applying patches to resume...');
+  logger.info('✅ Applying approved patches to resume...');
   
   try {
     // Validate required data
-    if (!state.patches || state.patches.length === 0) {
-      logger.warn('No patches to apply');
+    if (!state.approvedPatches || state.approvedPatches.length === 0) {
+      logger.warn('No approved patches to apply');
       return {
         ...state,
         resume: {
@@ -24,9 +24,9 @@ export async function applyPatchesNode(state) {
       throw new ProcessingError('Resume content not available for patch application');
     }
     
-    // Apply patches to resume content
+    // Apply only approved patches to resume content
     const { updatedSections, appliedPatches, failedPatches } = applyPatchesToResume(
-      state.patches, 
+      state.approvedPatches, 
       resumeSections
     );
     
@@ -110,6 +110,12 @@ function applySinglePatch(patch, resumeSections) {
     case 'enhance_experience':
       return applyExperiencePatch(patch, resumeSections);
     
+    case 'align_experience':
+      return applyExperienceAlignmentPatch(patch, resumeSections);
+    
+    case 'role_enhancement':
+      return applyRoleEnhancementPatch(patch, resumeSections);
+    
     case 'add_content':
       return applyContentPatch(patch, resumeSections);
     
@@ -162,7 +168,10 @@ function applyEnhancementPatch(patch, resumeSections) {
     const enhancements = [
       'with version control and best practices',
       'including modern frameworks and tools',
-      'with focus on scalability and performance'
+      'with focus on scalability and performance',
+      'following industry best practices and standards',
+      'with emphasis on code quality and maintainability',
+      'utilizing agile methodologies and continuous integration'
     ];
     
     const enhancement = enhancements[Math.floor(Math.random() * enhancements.length)];
@@ -201,6 +210,98 @@ function applyExperiencePatch(patch, resumeSections) {
   return {
     success: false,
     reason: 'Experience enhancement type not supported'
+  };
+}
+
+function applyExperienceAlignmentPatch(patch, resumeSections) {
+  const experienceSection = resumeSections.experience || '';
+  const action = patch.details.action;
+  const enhancementText = patch.details.value;
+  
+  let updatedContent = experienceSection;
+  let changes = {};
+  
+  switch (action) {
+    case 'add_technology_mention':
+      // Add technology mention to existing experience
+      updatedContent = experienceSection + '. ' + enhancementText;
+      changes = { addedTechnology: enhancementText };
+      break;
+      
+    case 'enhance_achievement':
+      // Add achievement enhancement
+      updatedContent = experienceSection + '. ' + enhancementText;
+      changes = { enhancedAchievement: enhancementText };
+      break;
+      
+    case 'emphasize_role_relevance':
+      // Emphasize role relevance
+      updatedContent = experienceSection + ' (Relevant to target role: ' + enhancementText + ')';
+      changes = { emphasizedRelevance: enhancementText };
+      break;
+      
+    case 'add_industry_context':
+      // Add industry-specific context
+      updatedContent = experienceSection + '. ' + enhancementText;
+      changes = { addedIndustryContext: enhancementText };
+      break;
+      
+    default:
+      // Generic enhancement
+      updatedContent = experienceSection + '. ' + enhancementText;
+      changes = { enhanced: enhancementText };
+  }
+  
+  return {
+    success: true,
+    section: 'experience',
+    updatedContent,
+    changes,
+    reason: patch.details.reason
+  };
+}
+
+function applyRoleEnhancementPatch(patch, resumeSections) {
+  const experienceSection = resumeSections.experience || '';
+  const enhancementText = patch.details.value;
+  const category = patch.details.category;
+  
+  let updatedContent = experienceSection;
+  let changes = {};
+  
+  // Apply the enhancement based on category
+  switch (category) {
+    case 'leadership_enhancement':
+      updatedContent = experienceSection + '. ' + enhancementText;
+      changes = { enhancedLeadership: enhancementText };
+      break;
+      
+    case 'technology_alignment':
+      updatedContent = experienceSection + '. ' + enhancementText;
+      changes = { alignedTechnology: enhancementText };
+      break;
+      
+    case 'industry_terminology':
+      updatedContent = experienceSection + '. ' + enhancementText;
+      changes = { addedIndustryTerminology: enhancementText };
+      break;
+      
+    case 'achievement_enhancement':
+      updatedContent = experienceSection + '. ' + enhancementText;
+      changes = { enhancedAchievement: enhancementText };
+      break;
+      
+    default:
+      updatedContent = experienceSection + '. ' + enhancementText;
+      changes = { enhanced: enhancementText };
+  }
+  
+  return {
+    success: true,
+    section: 'experience',
+    updatedContent,
+    changes,
+    reason: patch.details.reason
   };
 }
 

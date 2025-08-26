@@ -3,6 +3,10 @@ import { ProcessingError } from '../utils/error-handler.js';
 import { createTempDir, cleanupTempFiles } from '../utils/file-utils.js';
 import fs from 'fs/promises';
 import path from 'node:path';
+import { exec } from 'child_process';
+import { promisify } from 'node:util';
+
+const execAsync = promisify(exec);
 
 export async function exportNode(state) {
   logger.info('📤 Exporting optimized resume...');
@@ -13,7 +17,7 @@ export async function exportNode(state) {
       throw new ProcessingError('Resume has not been patched yet');
     }
     
-    if (!state.resume?.content?.sections) {
+    if (!state.resume?.content?.sections && !state.resume?.content?.jsonResume) {
       throw new ProcessingError('Resume content not available for export');
     }
     
@@ -43,6 +47,18 @@ export async function exportNode(state) {
         const p = path.join(outDir, 'patchReport.md');
         await fs.writeFile(p, exportResults.patchReport.content, 'utf8');
         outputFiles.patchReport = p;
+      }
+      if (exportResults.pdf?.filePath) {
+        const pdfName = path.basename(exportResults.pdf.filePath);
+        const pdfDest = path.join(outDir, pdfName);
+        await fs.copyFile(exportResults.pdf.filePath, pdfDest);
+        outputFiles.pdf = pdfDest;
+      }
+      if (exportResults.html?.filePath) {
+        const htmlName = path.basename(exportResults.html.filePath);
+        const htmlDest = path.join(outDir, htmlName);
+        await fs.copyFile(exportResults.html.filePath, htmlDest);
+        outputFiles.html = htmlDest;
       }
     }
     
@@ -108,23 +124,45 @@ async function generateExports(resume, tempDir) {
       format: 'markdown',
       size: patchReport.length
     };
-    
-    // TODO: Generate PDF using JSON Resume CLI
-    // This will be implemented when the CLI integration is complete
-    exports.pdf = {
-      content: null,
-      format: 'pdf',
-      status: 'pending_cli_integration',
-      note: 'PDF generation requires JSON Resume CLI integration'
-    };
-    
-    // TODO: Generate HTML using JSON Resume CLI
-    exports.html = {
-      content: null,
-      format: 'html',
-      status: 'pending_cli_integration',
-      note: 'HTML generation requires JSON Resume CLI integration'
-    };
+
+    // Write JSON to temp file for Resumed
+    const tmpJsonPath = path.join(tempDir, 'resume.json');
+    await fs.writeFile(tmpJsonPath, JSON.stringify(jsonResume, null, 2), 'utf8');
+
+    // Determine theme: prefer meta.theme, fallback to jsonresume-theme-straightforward
+    const theme = jsonResume?.meta?.theme || 'jsonresume-theme-straightforward';
+
+    // Generate HTML via Resumed
+    try {
+      const htmlOut = path.join(tempDir, 'resume.html');
+      await execAsync(`npx -y resumed render ${JSON.stringify(tmpJsonPath)} -t ${JSON.stringify(theme)} -o ${JSON.stringify(htmlOut)} | cat`);
+      const htmlContent = await fs.readFile(htmlOut, 'utf8');
+      exports.html = {
+        content: htmlContent,
+        format: 'html',
+        filePath: htmlOut,
+        size: htmlContent.length,
+        success: true
+      };
+    } catch (e) {
+      logger.warn('HTML generation via Resumed failed', { error: e.message });
+      exports.html = { content: null, format: 'html', filePath: null, success: false, error: e.message };
+    }
+
+    // Generate PDF via Resumed
+    try {
+      const pdfOut = path.join(tempDir, 'resume.pdf');
+      await execAsync(`npx -y resumed export ${JSON.stringify(tmpJsonPath)} -t ${JSON.stringify(theme)} -o ${JSON.stringify(pdfOut)} | cat`);
+      exports.pdf = {
+        content: null,
+        format: 'pdf',
+        filePath: pdfOut,
+        success: true
+      };
+    } catch (e) {
+      logger.warn('PDF generation via Resumed failed', { error: e.message });
+      exports.pdf = { content: null, format: 'pdf', filePath: null, success: false, error: e.message };
+    }
     
   } catch (error) {
     logger.error('Error generating exports', { error: error.message });
@@ -135,8 +173,25 @@ async function generateExports(resume, tempDir) {
 }
 
 function generateJSONResume(resume) {
-  const sections = resume.content.sections;
-  
+  // If we have a structured JSON Resume from parsing, prefer it to avoid data loss
+  const parsedJson = resume?.content?.jsonResume;
+  const meta = {
+    patched: resume.patched,
+    patchedAt: resume.patchedAt,
+    appliedPatches: resume.appliedPatches?.length || 0,
+    originalSections: Object.keys(resume.content.originalSections || {}),
+    patchedSections: Object.keys(resume.content.sections || {})
+  };
+
+  if (parsedJson && typeof parsedJson === 'object') {
+    return {
+      ...parsedJson,
+      meta: { ...(parsedJson.meta || {}), ...meta }
+    };
+  }
+
+  const sections = resume.content.sections || {};
+
   return {
     basics: {
       name: extractName(sections.header || ''),
@@ -149,13 +204,7 @@ function generateJSONResume(resume) {
     education: parseEducation(sections.education || ''),
     skills: parseSkills(sections.skills || ''),
     projects: parseProjects(sections.projects || ''),
-    meta: {
-      patched: resume.patched,
-      patchedAt: resume.patchedAt,
-      appliedPatches: resume.appliedPatches?.length || 0,
-      originalSections: Object.keys(resume.content.originalSections || {}),
-      patchedSections: Object.keys(sections)
-    }
+    meta
   };
 }
 

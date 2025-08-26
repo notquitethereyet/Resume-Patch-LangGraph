@@ -27,12 +27,13 @@
     "commander": "^12.0.0",
     "dotenv": "^17.2.1",
     "inquirer": "^9.2.15",
-    "jsonresume-theme-professional": "^1.1.0",
+    "jsonresume-theme-straightforward": "^0.2.0",
     "openai": "^5.15.0",
     "pdf-parse-new": "^1.4.1",
     "pdf2pic": "^3.2.0",
     "pdfreader": "^3.0.7",
-    "resume-cli": "^3.0.8"
+    "puppeteer": "^24.17.0",
+    "resumed": "^6.0.0"
   },
   "devDependencies": {
     "eslint": "^8.57.0",

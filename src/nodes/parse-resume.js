@@ -23,17 +23,23 @@ async function aiParseJsonResume(pdfText) {
   const client = new OpenAI({ apiKey });
 
   const system = `You are a resume parser. Return only valid JSON.
-Your goal is to extract ONLY the data needed for resume optimization: basics (subset), work[], skills[].
+Your goal is to extract the data needed for resume optimization: basics, work[], education[], skills[], projects[].
 Rules:
 - Ignore page headers/footers, timestamps, URLs with theme params, and page numbering like "2 of 4".
-- Focus exclusively on Work Experience and Skills; ignore Projects, Awards, References unless they are explicitly under Work or Skills.
+- Extract all available sections: Work Experience, Education, Skills, and Projects.
 - Work parsing rules:
   - If a role line contains a title and dates (e.g., "Senior Developer May 2020 — May 2021"), and the next line is a company name, use that as company.
   - Keep highlights as bullet-like lines; do not invent.
   - Use location if present near company or role; otherwise omit.
+- Education parsing rules:
+  - Extract institution name, degree type, field of study, and dates if available.
+  - Include both undergraduate and graduate degrees.
 - Skills rules:
   - Return a flat, deduplicated array of skill names as strings (no categories, no grouping objects).
   - Split on commas, slashes, or bullets; trim whitespace; keep concise canonical names (e.g., "React", "Node.js").
+- Projects parsing rules:
+  - Extract project names, descriptions, and key highlights.
+  - Include technologies used and outcomes achieved.
 - Do not fabricate missing information. Omit fields that are not present in the text.`;
 
   const preset = {
@@ -49,8 +55,24 @@ Rules:
         highlights: []
       }
     ],
+    education: [
+      {
+        institution: '',
+        area: '',
+        studyType: '',
+        startDate: '',
+        endDate: ''
+      }
+    ],
     skills: [
       { name: '' }
+    ],
+    projects: [
+      {
+        name: '',
+        description: '',
+        highlights: []
+      }
     ]
   };
 
@@ -79,7 +101,9 @@ Resume Text:\n\n${pdfText.substring(0, 150000)}`;
   if (!parsed || typeof parsed !== 'object') throw new Error('Invalid JSON structure');
   parsed.basics = parsed.basics || {};
   parsed.work = Array.isArray(parsed.work) ? parsed.work : [];
+  parsed.education = Array.isArray(parsed.education) ? parsed.education : [];
   parsed.skills = Array.isArray(parsed.skills) ? parsed.skills : [];
+  parsed.projects = Array.isArray(parsed.projects) ? parsed.projects : [];
   return parsed;
 }
 

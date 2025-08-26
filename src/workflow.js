@@ -4,6 +4,7 @@ import { fetchJDNode } from './nodes/fetch-jd.js';
 import { parseResumeNode } from './nodes/parse-resume.js';
 import { analyzeNode } from './nodes/analyze.js';
 import { suggestPatchesNode } from './nodes/suggest-patches.js';
+import { approvePatchesNode } from './nodes/approve-patches.js';
 import { applyPatchesNode } from './nodes/apply-patches.js';
 import { exportNode } from './nodes/export.js';
 
@@ -13,6 +14,7 @@ export const ResumeState = {
   jobDescription: { url: null, text: null },
   analysis: { keywords: [], matchScore: 0 },
   patches: [],
+  approvedPatches: [],
   output: { path: null, finalResume: null },
   error: { messages: [], retryCount: 0 }
 };
@@ -32,6 +34,7 @@ export function createWorkflow() {
       keywords: { reducer: (l = [], r) => l.concat(r || []), default: () => [] },
       match_score: { reducer: (_l, r) => r, default: () => 0.0 },
       patches: { reducer: (l = [], r) => l.concat(r || []), default: () => [] },
+      approvedPatches: { reducer: (_l, r) => r, default: () => [] },
       final_resume: { reducer: (_l, r) => r, default: () => null },
       processing_log: { reducer: (l = [], r) => l.concat(r || []), default: () => [] },
       errors: { reducer: (l = [], r) => l.concat(r || []), default: () => [] },
@@ -41,6 +44,7 @@ export function createWorkflow() {
       step_timings: { reducer: (l = {}, r = {}) => ({ ...l, ...r }), default: () => ({}) },
       output_path: { reducer: (_l, r) => r, default: () => null },
       allow_disk: { reducer: (_l, r) => r, default: () => false },
+      auto_apply: { reducer: (_l, r) => r, default: () => false },
       output: { reducer: (_l, r) => r, default: () => null }
     }
   });
@@ -52,6 +56,7 @@ export function createWorkflow() {
     .addNode("fetch_jd", fetchJDNode)
     .addNode("analyze", analyzeNode)
     .addNode("suggest_patches", suggestPatchesNode)
+    .addNode("approve_patches", approvePatchesNode)
     .addNode("apply_patches", applyPatchesNode)
     .addNode("export", exportNode)
     .addNode("handle_error", handleErrorNode)
@@ -147,17 +152,20 @@ export function createWorkflow() {
       }
       
       if (state.patches && state.patches.length > 0) {
-        return "apply_patches";
+        return "approve_patches";
       } else {
         // No patches generated, skip to export
         return "export";
       }
     },
     {
-      "apply_patches": "apply_patches",
+      "approve_patches": "approve_patches",
       "export": "export"
     }
   );
+  
+  // Approve Patches -> Apply Patches (always, even if no patches approved)
+  workflow.addEdge("approve_patches", "apply_patches");
   
   // Apply Patches -> Export (always, even if some patches failed)
   workflow.addEdge("apply_patches", "export");
@@ -237,11 +245,13 @@ export async function resumePatch(resumePath, options) {
     jd_url: options.job || null,
     jd_text: options.text || null,
     allow_disk: Boolean(options.allowDisk),
+    auto_apply: Boolean(options.autoApply),
     resume: null,
     resume_json: null,
     keywords: [],
     match_score: 0.0,
     patches: [],
+    approvedPatches: [],
     final_resume: null,
     processing_log: [],
     errors: [],
