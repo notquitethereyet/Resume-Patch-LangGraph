@@ -67,7 +67,15 @@ function getResumeSectionsFromJsonResume(json) {
   const basicsText = [basics.name, basics.email, basics.phone, basics.summary].filter(Boolean).join(' ');
   const workText = work.map(w => [w.position, w.company, w.location, w.summary, (w.highlights || []).join(' ')].filter(Boolean).join(' ')).join('\n');
   const educationText = education.map(e => [e.institution, e.area, e.studyType, e.degree].filter(Boolean).join(' ')).join('\n');
-  const skillsText = skills.map(s => (typeof s === 'string' ? s : s.name)).filter(Boolean).join(', ');
+  const skillsText = skills
+    .map(s => {
+      if (typeof s === 'string') return s;
+      const name = s?.name || '';
+      const kws = Array.isArray(s?.keywords) ? s.keywords.filter(Boolean).join(', ') : '';
+      return name && kws ? `${name}: ${kws}` : name;
+    })
+    .filter(Boolean)
+    .join('\n');
 
   return {
     basics: basicsText,
@@ -77,6 +85,46 @@ function getResumeSectionsFromJsonResume(json) {
   };
 }
 
+// Helper: call OpenAI with structured outputs schema and fallback to json_object
+async function callOpenAIWithSchema(client, messages, jsonSchema) {
+  try {
+    const res = await client.chat.completions.create({
+      model: process.env.OPENAI_MODEL,
+      messages,
+      response_format: { type: 'json_schema', json_schema: jsonSchema }
+    });
+    return res.choices[0]?.message?.content || '';
+  } catch (e) {
+    const res = await client.chat.completions.create({
+      model: process.env.OPENAI_MODEL,
+      messages,
+      response_format: { type: 'json_object' }
+    });
+    return res.choices[0]?.message?.content || '';
+  }
+}
+
+function tryParseJSON(content) {
+  if (!content) return null;
+  let text = String(content).trim();
+  // Strip code fences if present
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) text = fence[1].trim();
+  try {
+    return JSON.parse(text);
+  } catch {}
+  // Try to extract first JSON array/object substring
+  const objMatch = text.match(/\{[\s\S]*\}/);
+  if (objMatch) {
+    try { return JSON.parse(objMatch[0]); } catch {}
+  }
+  const arrMatch = text.match(/\[[\s\S]*\]/);
+  if (arrMatch) {
+    try { return JSON.parse(arrMatch[0]); } catch {}
+  }
+  return null;
+}
+
 async function generatePatches(analysis, resumeSections, jobDescription) {
   const patches = [];
   
@@ -84,6 +132,16 @@ async function generatePatches(analysis, resumeSections, jobDescription) {
   if (analysis.skillGaps && analysis.skillGaps.length > 0) {
     const skillPatches = await generateSkillPatches(analysis.skillGaps, resumeSections.skills || '', jobDescription);
     patches.push(...skillPatches);
+  }
+
+  // JD-inferred skills: when JD is present, infer concrete stack items to ensure coverage
+  if (jobDescription) {
+    try {
+      const jdSkills = await generateJDInferredSkills(jobDescription, resumeSections.skills || '');
+      patches.push(...jdSkills);
+    } catch (e) {
+      logger.warn('JD-inferred skills generation failed', { error: e.message });
+    }
   }
   
   // Experience patches
@@ -164,35 +222,20 @@ TASK: Select the top ${maxPatches} most valuable patches that would have the hig
 
 Return ONLY a JSON array of the patch numbers (1-based) to keep, like: [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29]`;
 
-    const response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.1,
-      max_tokens: 200
-    });
-
-    const content = response.choices[0]?.message?.content;
+    const schema = {
+      name: 'patch_index_array',
+      schema: { type: 'array', minItems: 0, items: { type: 'integer', minimum: 1 } }
+    };
+    const content = await callOpenAIWithSchema(client, [{ role: 'user', content: prompt }], schema);
     if (!content) {
       throw new Error('No response from OpenAI');
     }
-
-    try {
-      // Extract JSON array from response
-      const jsonMatch = content.match(/\[.*\]/);
-      if (jsonMatch) {
-        const selectedIndices = JSON.parse(jsonMatch[0]);
-        if (Array.isArray(selectedIndices)) {
-          // Convert 1-based indices to 0-based and filter patches
-          return selectedIndices
-            .map(index => patches[index - 1])
-            .filter(Boolean)
-            .slice(0, maxPatches);
-        }
-      }
-      throw new Error('Invalid response format');
-    } catch (parseError) {
-      throw new Error(`Failed to parse AI response: ${parseError.message}`);
-    }
+    const parsed = tryParseJSON(content);
+    if (!Array.isArray(parsed)) throw new Error('Invalid response format');
+    return parsed
+      .map(index => patches[index - 1])
+      .filter(Boolean)
+      .slice(0, maxPatches);
   } catch (error) {
     console.warn('Failed to use AI for patch filtering, falling back to priority-based selection:', error.message);
     // Fallback: select top patches by priority
@@ -274,7 +317,8 @@ async function generateSkillPatches(skillGaps, currentSkills, jobDescription) {
       });
     }
   } catch (error) {
-    console.warn('Failed to use AI for skill filtering, falling back to basic filtering:', error.message);
+    // Explicit telemetry so user can see when we fall back
+    try { logger.warn('AI skill filtering failed; using fallback filter', { error: error?.message }); } catch {}
     // Fallback to basic filtering if AI fails
     const fallbackSkills = skillGaps
       .filter(skill => {
@@ -306,16 +350,12 @@ async function generateSkillPatches(skillGaps, currentSkills, jobDescription) {
 
 // AI-powered skill filtering
 async function aiFilterSkills(skillGaps, currentSkills, jobDescription) {
-  const { OpenAI } = await import('openai');
-  const apiKey = process.env.OPENAI_API_KEY;
-  
-  if (!apiKey) {
-    throw new Error('OpenAI API key not available');
-  }
-  
-  const client = new OpenAI({ apiKey });
-  
-  const prompt = `You are an expert resume optimization specialist. Analyze the following:
+  try {
+    const { OpenAI } = await import('openai');
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return [];
+    const client = new OpenAI({ apiKey });
+    const prompt = `You are an expert resume optimization specialist. Analyze the following:
 
 JOB DESCRIPTION:
 ${jobDescription}
@@ -332,32 +372,39 @@ TASK: Identify the top 8 most valuable and specific technical skills/technologie
 3. Technologies that would significantly improve the resume's match score
 4. Skills that are NOT already mentioned in the current resume content
 5. Skills that are specific enough to be actionable
-6. AVOID generic business terms like "Payment Systems", "Checkout Processes", "Automation", "Financial" - focus on specific technical tools, frameworks, and technologies
+6. AVOID generic terms like "REST", "API", "Web", "Database", "Systems Design". Prefer concrete stacks (e.g., "PostgreSQL", "MySQL", "AWS", "GCP", "CI/CD", "Rails", "Golang", "React")
 
 Return ONLY a JSON array of the top 8 skills, like: ["React", "AWS Lambda", "PostgreSQL", "TypeScript", "Docker", "Kubernetes", "GraphQL", "Redis"]`;
-
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0.1,
-    max_tokens: 300
-  });
-
-  const content = response.choices[0]?.message?.content;
-  if (!content) {
-    throw new Error('No response from OpenAI');
-  }
-
-  try {
-    // Extract JSON array from response
-    const jsonMatch = content.match(/\[.*\]/);
-    if (jsonMatch) {
-      const skills = JSON.parse(jsonMatch[0]);
-      return Array.isArray(skills) ? skills.slice(0, 8) : [];
+    const schema = {
+      name: 'skills_string_array',
+      schema: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } }
+    };
+    const content = await callOpenAIWithSchema(client, [{ role: 'user', content: prompt }], schema);
+    const parsed = tryParseJSON(content);
+    let arr = [];
+    if (Array.isArray(parsed)) arr = parsed;
+    else if (parsed && typeof parsed === 'object') {
+      arr = parsed.skills || parsed.values || parsed.items || [];
     }
-    throw new Error('Invalid response format');
-  } catch (parseError) {
-    throw new Error(`Failed to parse AI response: ${parseError.message}`);
+    if (!Array.isArray(arr)) return [];
+    // Filter generics and dedupe
+    const isGeneric = (s) => /^(rest|api|web|database|systems? design)$/i.test(String(s).trim());
+    const seen = new Set();
+    const out = [];
+    for (const s of arr) {
+      const v = String(s || '').trim();
+      if (!v || isGeneric(v)) continue;
+      const key = v.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(v);
+      if (out.length >= 8) break;
+    }
+    return out;
+  } catch {
+    // Surface a warning for observability
+    try { logger.warn('aiFilterSkills failed; returning empty to trigger caller fallback'); } catch {}
+    return [];
   }
 }
 
@@ -552,44 +599,46 @@ Return ONLY a JSON array, like:
   }
 ]`;
 
-    const response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.1,
-      max_tokens: 400
-    });
-
-    const content = response.choices[0]?.message?.content;
+    const schema = {
+      name: 'role_enhancements_array',
+      schema: {
+        type: 'array',
+        minItems: 0,
+        items: {
+          type: 'object',
+          required: ['text', 'reason', 'category'],
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string', minLength: 3 },
+            reason: { type: 'string', minLength: 3 },
+            category: { type: 'string', minLength: 3 }
+          }
+        }
+      }
+    };
+    const content = await callOpenAIWithSchema(client, [{ role: 'user', content: prompt }], schema);
     if (!content) {
       throw new Error('No response from OpenAI');
     }
-
-    try {
-      const jsonMatch = content.match(/\[.*\]/s);
-      if (jsonMatch) {
-        const enhancements = JSON.parse(jsonMatch[0]);
-        if (Array.isArray(enhancements)) {
-          enhancements.forEach((enhancement, index) => {
-            patches.push({
-              id: `role_enhance_${index + 1}`,
-              type: 'role_enhancement',
-              priority: 'high',
-              description: `Role-specific enhancement: ${enhancement.category}`,
-              details: {
-                action: 'enhance_for_role',
-                value: enhancement.text,
-                reason: enhancement.reason,
-                category: enhancement.category,
-                impact: 'High impact on job relevance'
-              },
-              estimatedEffort: 'medium',
-              confidence: 0.85
-            });
-          });
-        }
-      }
-    } catch (parseError) {
-      throw new Error(`Failed to parse AI response: ${parseError.message}`);
+    const enhancements = tryParseJSON(content);
+    if (Array.isArray(enhancements)) {
+      enhancements.forEach((enhancement, index) => {
+        patches.push({
+          id: `role_enhance_${index + 1}`,
+          type: 'role_enhancement',
+          priority: 'high',
+          description: `Role-specific enhancement: ${enhancement.category}`,
+          details: {
+            action: 'enhance_for_role',
+            value: enhancement.text,
+            reason: enhancement.reason,
+            category: enhancement.category,
+            impact: 'High impact on job relevance'
+          },
+          estimatedEffort: 'medium',
+          confidence: 0.85
+        });
+      });
     }
   } catch (error) {
     logger.warn('Failed to generate role-specific enhancements:', error.message);
@@ -646,45 +695,46 @@ Return ONLY a JSON array of patches, like:
   }
 ]`;
 
-    const response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.1,
-      max_tokens: 500
-    });
-
-    const content = response.choices[0]?.message?.content;
+    const schema = {
+      name: 'exp_alignment_patches',
+      schema: {
+        type: 'array',
+        minItems: 0,
+        items: {
+          type: 'object',
+          required: ['action', 'text', 'reason'],
+          additionalProperties: false,
+          properties: {
+            action: { type: 'string', minLength: 2 },
+            text: { type: 'string', minLength: 3 },
+            reason: { type: 'string', minLength: 3 }
+          }
+        }
+      }
+    };
+    const content = await callOpenAIWithSchema(client, [{ role: 'user', content: prompt }], schema);
     if (!content) {
       throw new Error('No response from OpenAI');
     }
-
-    try {
-      // Extract JSON array from response
-      const jsonMatch = content.match(/\[.*\]/s);
-      if (jsonMatch) {
-        const alignmentPatches = JSON.parse(jsonMatch[0]);
-        if (Array.isArray(alignmentPatches)) {
-          alignmentPatches.forEach((patch, index) => {
-            patches.push({
-              id: `exp_align_${index + 1}`,
-              type: 'align_experience',
-              priority: 'high',
-              description: `Align experience: ${patch.action}`,
-              details: {
-                action: patch.action,
-                value: patch.text,
-                reason: patch.reason,
-                category: 'experience_alignment',
-                impact: 'High impact on job relevance'
-              },
-              estimatedEffort: 'medium',
-              confidence: 0.9
-            });
-          });
-        }
-      }
-    } catch (parseError) {
-      throw new Error(`Failed to parse AI response: ${parseError.message}`);
+    const alignmentPatches = tryParseJSON(content);
+    if (Array.isArray(alignmentPatches)) {
+      alignmentPatches.forEach((patch, index) => {
+        patches.push({
+          id: `exp_align_${index + 1}`,
+          type: 'align_experience',
+          priority: 'high',
+          description: `Align experience: ${patch.action}`,
+          details: {
+            action: patch.action,
+            value: patch.text,
+            reason: patch.reason,
+            category: 'experience_alignment',
+            impact: 'High impact on job relevance'
+          },
+          estimatedEffort: 'medium',
+          confidence: 0.9
+        });
+      });
     }
   } catch (error) {
     logger.warn('Failed to generate experience alignment patches:', error.message);
@@ -695,17 +745,14 @@ Return ONLY a JSON array of patches, like:
 
 // AI-powered keyword filtering
 async function aiFilterKeywords(missingKeywords, resumeSections, jobDescription) {
-  const { OpenAI } = await import('openai');
-  const apiKey = process.env.OPENAI_API_KEY;
-  
-  if (!apiKey) {
-    throw new Error('OpenAI API key not available');
-  }
-  
-  const client = new OpenAI({ apiKey });
-  
-  const resumeText = Object.values(resumeSections).join(' ');
-  const prompt = `You are an expert resume optimization specialist. Analyze the following:
+  try {
+    const { OpenAI } = await import('openai');
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return [];
+    const client = new OpenAI({ apiKey });
+
+    const resumeText = Object.values(resumeSections).join(' ');
+    const prompt = `You are an expert resume optimization specialist. Analyze the following:
 
 JOB DESCRIPTION:
 ${jobDescription}
@@ -721,31 +768,85 @@ TASK: Identify the top 5 most valuable and specific technical skills/technologie
 2. Skills that directly match the job requirements
 3. Technologies that would significantly improve the resume's ATS match score
 4. Skills that are NOT already mentioned in the current resume content
-5. AVOID generic business terms like "Payment Systems", "Checkout Processes", "Automation", "Financial" - focus on specific technical tools, frameworks, and technologies
+5. AVOID generic terms like "REST", "API", "Web", "Database", "Systems Design" - focus on specific frameworks, clouds, DBs, and CI/CD tools
 
 Return ONLY a JSON array of the top 5 keywords, like: ["React", "AWS Lambda", "PostgreSQL"]`;
 
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0.1,
-    max_tokens: 200
-  });
-
-  const content = response.choices[0]?.message?.content;
-  if (!content) {
-    throw new Error('No response from OpenAI');
-  }
-
-  try {
-    // Extract JSON array from response
-    const jsonMatch = content.match(/\[.*\]/);
-    if (jsonMatch) {
-      const keywords = JSON.parse(jsonMatch[0]);
-      return Array.isArray(keywords) ? keywords.slice(0, 5) : [];
+    const schema = {
+      name: 'keywords_string_array',
+      schema: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } }
+    };
+    const content = await callOpenAIWithSchema(client, [{ role: 'user', content: prompt }], schema);
+    const parsed = tryParseJSON(content);
+    let arr = [];
+    if (Array.isArray(parsed)) arr = parsed;
+    else if (parsed && typeof parsed === 'object') {
+      arr = parsed.keywords || parsed.values || parsed.items || [];
     }
-    throw new Error('Invalid response format');
-  } catch (parseError) {
-    throw new Error(`Failed to parse AI response: ${parseError.message}`);
+    if (!Array.isArray(arr)) return [];
+    const isGeneric = (s) => /^(rest|api|web|database|systems? design)$/i.test(String(s).trim());
+    const seen = new Set();
+    const out = [];
+    for (const s of arr) {
+      const v = String(s || '').trim();
+      if (!v || isGeneric(v)) continue;
+      const key = v.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(v);
+      if (out.length >= 5) break;
+    }
+    return out;
+  } catch {
+    try { logger.warn('aiFilterKeywords failed; returning empty to trigger caller fallback'); } catch {}
+    return [];
   }
+}
+
+// Infer concrete skills directly from JD to ensure coverage of clouds/DBs/MVC
+async function generateJDInferredSkills(jobDescription, currentSkillsText) {
+  const patches = [];
+  const { OpenAI } = await import('openai');
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return patches;
+  const client = new OpenAI({ apiKey });
+
+  const prompt = `From this job description, extract concrete technologies only (frameworks, clouds, databases, languages, devops). Avoid generic terms like REST, API, Systems Design.
+
+JOB DESCRIPTION:\n${jobDescription}
+
+CURRENT SKILLS (text):\n${currentSkillsText}
+
+Return a JSON array of unique concrete skills such as ["Python", "Ruby on Rails", "Node.js", "Golang", "React", "PostgreSQL", "AWS", "GCP", "CI/CD"].`;
+
+  const schema = { name: 'jd_skills_array', schema: { type: 'array', minItems: 0, items: { type: 'string', minLength: 1 } } };
+  try {
+    const content = await callOpenAIWithSchema(client, [{ role: 'user', content: prompt }], schema);
+    if (!content) return patches;
+    const jsonMatch = content.match(/\[.*\]/s);
+    const arr = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    const existing = String(currentSkillsText || '').toLowerCase();
+    (arr || []).forEach(skill => {
+      const s = String(skill || '').trim();
+      if (!s) return;
+      if (existing.includes(s.toLowerCase())) return;
+      patches.push({
+        id: `jd_skill_${s.toLowerCase().replace(/\s+/g, '_')}`,
+        type: 'add_skill',
+        priority: 'high',
+        description: `Add JD-inferred technology: ${s}`,
+        details: { action: 'add_to_skills_section', value: s, category: 'technical_skills', impact: 'High impact on JD alignment' },
+        jsonPatch: [
+          { op: 'add', path: '/skills/-', value: { name: 'Skills', keywords: [] } },
+          { op: 'add', path: '/skills/0/keywords/-', value: s }
+        ],
+        estimatedEffort: 'low',
+        confidence: 0.8
+      });
+    });
+  } catch (e) {
+    // best-effort; ignore
+  }
+
+  return patches;
 }

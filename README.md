@@ -10,6 +10,7 @@ AI-powered resume optimization tool using LangGraph for intelligent workflow man
 - **AI-Powered Patch Generation**: Uses GPT-4o to intelligently identify and prioritize the most valuable resume improvements
 - **Interactive Patch Approval**: Review and approve suggested resume improvements before application
 - **Automated Optimization**: Generate and apply approved JSON patches to improve resumes (work/skills only)
+ - **Schema-safe Patching (RFC6902)**: Approved changes are now applied to structured `jsonResume` using JSON Patch (fast-json-patch) when available, with a safe fallback to text-section edits. This reduces breakage and keeps exports consistent.
 - **Multiple Export Formats**: Export optimized resumes in PDF and HTML formats
 - **CLI Interface**: Easy-to-use command-line tool with interactive prompts
 
@@ -94,7 +95,7 @@ The tool now uses GPT-4o to intelligently analyze your resume against the job de
 
 The tool now provides sophisticated work experience optimization that goes beyond basic skills matching:
 
-- **AI-Powered Experience Alignment**: Uses GPT-4o to analyze your work experience against the specific job requirements
+- **AI-Powered Experience Alignment**: Uses GPT-5-mini to analyze your work experience against the specific job requirements
 - **Role-Specific Enhancements**: Automatically suggests additions that make your experience more relevant to the target role
 - **Technology Stack Alignment**: Incorporates specific technologies, tools, and frameworks mentioned in the job description
 - **Industry Terminology**: Uses industry-specific language and processes from the job posting
@@ -139,6 +140,27 @@ The tool exports optimized resumes in multiple formats:
 - **Patch Report**: Detailed report of all applied optimizations
 
 **Note**: The export function now correctly preserves all resume data including work experience, education, and skills - not just the skills section.
+
+#### Robust Patching (JSON Patch)
+
+- When your resume has a parsed `jsonResume`, patches include RFC6902 ops (e.g., adding keywords under `skills[*].keywords`).
+- We apply ops atomically to `jsonResume` first; any failures are logged and the system falls back to text-based edits for that specific patch.
+- Exports (PDF/HTML) are based on the final `jsonResume` and synchronized text sections, ensuring consistency.
+
+Example emitted ops for adding a skill:
+
+```json
+[
+  { "op": "add", "path": "/skills/-", "value": { "name": "Skills", "keywords": [] } },
+  { "op": "add", "path": "/skills/0/keywords/-", "value": "React" }
+]
+```
+
+#### Skills Preservation and Minimums
+
+- The exporter merges original and patched skills text to build grouped skills.
+- Each skills category will contain at least 5 keywords. Missing items are supplemented from mined technologies in work/projects without deleting existing skills.
+- Existing skills are never removed unless clearly misaligned with the job and explicitly excluded during patch approval.
 
 Example interaction:
 ```
@@ -243,7 +265,7 @@ src/
   - `basics`: name, email, phone, location, summary
   - `work`: company, position, dates, summary
   - `education`: institution, area, studyType, dates
-  - `skills`: list of skill objects
+  - `skills`: categorized skills using structured outputs (OpenAI JSON Schema). Each item is `{ name: string, keywords: string[] }` with category labels in `name` and only concrete technologies in `keywords`.
   - `projects`: name, description, keywords
 
 ## Development Status
@@ -257,3 +279,16 @@ This project is currently in active development. Recent updates include:
 ## License
 
 MIT
+
+## Recent Changes
+
+- Location normalization for PDF export: exporter ensures `basics.location.region` is set (e.g., `"US"`) and synthesizes `address` as `"City, US"` so the straightforward theme renders the country after the city.
+- Skills enrichment: when source skills lack concrete keywords, technologies are mined from work/project text and grouped (Backend, Frontend, ML/Data, Cloud/DevOps, Datastores, Practices). These are saved to `optimized-resume/resume.json` and used for PDF/HTML export.
+  - Export ensures a minimum of 5 keywords per skills category and preserves original grouped items.
+- Work bullets refined for clarity while preserving original metrics and tech stack.
+
+Re-export with:
+
+```bash
+npm start
+```

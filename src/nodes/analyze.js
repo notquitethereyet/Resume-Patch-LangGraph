@@ -285,13 +285,12 @@ async function aiExtractKeywords(jobText) {
   const user = `Job Description:\n\n${jobText.substring(0, 12000)}\n\nReturn only JSON as specified.`;
 
   const resp = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: process.env.OPENAI_MODEL,
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user }
     ],
-    response_format: { type: 'json_object' },
-    temperature: 0
+    response_format: { type: 'json_object' }
   });
 
   const content = resp.choices?.[0]?.message?.content;
