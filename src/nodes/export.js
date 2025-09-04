@@ -278,7 +278,7 @@ function generateJSONResume(resume) {
       ...parsedJson,
       basics,
       work,
-      skills,
+      skills: mergeSkillGroups(skills),
       projects,
       meta: { ...(parsedJson.meta || {}), ...meta }
     };
@@ -296,7 +296,7 @@ function generateJSONResume(resume) {
     })),
     work: parseWorkExperience(sections.experience || ''),
     education: parseEducation(sections.education || ''),
-    skills: (() => {
+    skills: mergeSkillGroups((() => {
       const grouped = extractGroupedSkills(sections.skills || '');
       if (grouped.length > 0 && hasConcreteTech(grouped)) return grouped;
       // fallback: mine tech from experience/projects text
@@ -306,7 +306,7 @@ function generateJSONResume(resume) {
       });
       const groupedMined = groupSkillsByHeuristics(mined);
       return groupedMined.length > 0 ? groupedMined : grouped;
-    })(),
+    })()),
     projects: parseProjects(sections.projects || ''),
     meta
   };
@@ -564,39 +564,53 @@ function extractGroupedSkills(text) {
 
 function groupSkillsByHeuristics(keywords) {
   const buckets = {
-    'Backend Development & Infrastructure': new Set(),
-    'Frontend Development & UI Engineering': new Set(),
-    'Machine Learning & Data Engineering': new Set(),
-    'Cloud & DevOps': new Set(),
-    'Datastores': new Set(),
-    'Practices & Methodologies': new Set()
+    'Frontend Development': new Set(),
+    'Backend Development': new Set(),
+    'Data & Machine Learning': new Set(),
+    'DevOps & Infrastructure': new Set(),
+    'Software Engineering Practices': new Set(),
   };
 
   const lower = (s) => s.toLowerCase();
 
-  const isBackend = (k) => /^(python|fastapi|flask|node\.js|express\.js|rest|api|graphql)$/i.test(k) || ['redis'].includes(lower(k));
-  const isFrontend = (k) => /^(javascript|typescript|react|react\.js|angular|tailwind|html|css|wcag)/i.test(k);
-  const isML = (k) => /^(pytorch|tensorflow|scikit|scikit-learn|numpy|pandas|langchain|llm|rAG|vector|embedding|data visualization|statistical analysis)$/i.test(k);
-  const isCloud = (k) => /^(docker|kubernetes|gcp|google cloud|aws|azure|ci\/cd|git)$/i.test(k);
-  const isDB = (k) => /^(postgres|postgresql|mongodb|mysql|redis)$/i.test(k);
-  const isPractice = (k) => /^(agile|oop|object-oriented|tdd|test-driven|system architecture|performance optimization|secure coding)/i.test(k);
+  const isFrontend = (k) => /^(javascript|typescript|react|react\.js|angular|vue|astro|tailwind|html|css|wcag|frontend)/i.test(k);
+  const isBackend = (k) => /^(python|fastapi|flask|node\.js|express\.js|rest|api|graphql|go|golang|ruby|rails|java|spring)/i.test(k);
+  const isDB = (k) => /^(sql|postgres|postgresql|mongodb|mysql|redis|database|datastore)/i.test(k);
+  const isML = (k) => /^(pytorch|tensorflow|scikit|scikit-learn|numpy|pandas|langchain|llm|rAG|vector|embedding|data visualization|statistical analysis|machine learning|data science)/i.test(k);
+  const isDevOps = (k) => /^(docker|kubernetes|gcp|google cloud|aws|azure|ci\/cd|git|terraform|ansible|devops|infrastructure)/i.test(k);
+  const isPractice = (k) => /^(agile|scrum|oop|object-oriented|tdd|test-driven|system architecture|performance optimization|secure coding|software development)/i.test(k);
 
   keywords.forEach(k => {
     const key = String(k).trim();
     if (!key) return;
-    if (isBackend(key)) return buckets['Backend Development & Infrastructure'].add(k);
-    if (isFrontend(key)) return buckets['Frontend Development & UI Engineering'].add(k);
-    if (isML(key)) return buckets['Machine Learning & Data Engineering'].add(k);
-    if (isCloud(key)) return buckets['Cloud & DevOps'].add(k);
-    if (isDB(key)) return buckets['Datastores'].add(k);
-    if (isPractice(key)) return buckets['Practices & Methodologies'].add(k);
+    if (isFrontend(key)) return buckets['Frontend Development'].add(k);
+    if (isBackend(key)) return buckets['Backend Development'].add(k);
+    if (isML(key)) return buckets['Data & Machine Learning'].add(k);
+    if (isDB(key)) return buckets['Data & Machine Learning'].add(k); // Put DBs with Data & ML
+    if (isDevOps(key)) return buckets['DevOps & Infrastructure'].add(k);
+    if (isPractice(key)) return buckets['Software Engineering Practices'].add(k);
     // Fallback: put into Backend by default to avoid dropping skills
-    buckets['Backend Development & Infrastructure'].add(k);
+    buckets['Backend Development'].add(k);
   });
 
   return Object.entries(buckets)
     .map(([name, set]) => ({ name, keywords: Array.from(set) }))
     .filter(group => group.keywords.length > 0);
+}
+
+function mergeSkillGroups(groups) {
+  if (!Array.isArray(groups)) return [];
+  const merged = new Map();
+  groups.forEach(group => {
+    if (group && group.name && Array.isArray(group.keywords)) {
+      const name = group.name;
+      const existing = merged.get(name);
+      const keywords = new Set(existing ? existing.keywords : []);
+      group.keywords.forEach(kw => keywords.add(kw));
+      merged.set(name, { name, keywords: Array.from(keywords) });
+    }
+  });
+  return Array.from(merged.values());
 }
 
 function normalizeWorkDates(work) {
